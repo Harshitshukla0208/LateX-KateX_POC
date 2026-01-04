@@ -1,65 +1,162 @@
-import Image from "next/image";
+"use client"
+
+import React, { useState, useRef, useEffect } from "react";
+import MathLiveInput from "@/components/MathLiveInput";
 
 export default function Home() {
+  const [value, setValue] = useState("");
+  const [showEquationEditor, setShowEquationEditor] = useState(false);
+  const [isMathLiveLoaded, setIsMathLiveLoaded] = useState(false);
+  const [showJSON, setShowJSON] = useState(false);
+  const mathFieldRef = useRef<any>(null);
+
+  // Load MathLive
+  useState(() => {
+    if (typeof window !== 'undefined') {
+      import('mathlive').then(() => {
+        setIsMathLiveLoaded(true);
+      });
+    }
+  });
+
+  const handleInsertEquation = () => {
+    setShowEquationEditor(true);
+  };
+
+  // Auto-focus math-field when equation editor opens
+  useEffect(() => {
+    if (showEquationEditor && mathFieldRef.current && isMathLiveLoaded) {
+      setTimeout(() => {
+        mathFieldRef.current?.focus();
+      }, 100);
+    }
+  }, [showEquationEditor, isMathLiveLoaded]);
+
+  const handleDoneEquation = () => {
+    if (mathFieldRef.current) {
+      const latex = mathFieldRef.current.getValue();
+      if (latex) {
+        // Append equation with delimiters to the current value
+        setValue(value + `$$${latex}$$ `);
+      }
+    }
+    setShowEquationEditor(false);
+    if (mathFieldRef.current) {
+      mathFieldRef.current.setValue('');
+    }
+  };
+
+  const handleCancelEquation = () => {
+    setShowEquationEditor(false);
+    if (mathFieldRef.current) {
+      mathFieldRef.current.setValue('');
+    }
+  };
+
+  const handleCreateJSON = () => {
+    setShowJSON(true);
+  };
+
+  const getQuestionJSON = () => {
+    return {
+      question: value
+    };
+  };
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+    <div className="flex flex-col items-center justify-center min-h-screen p-8 bg-gray-50">
+      <div className="w-full max-w-3xl">
+        <h1 className="text-3xl font-bold mb-6 text-gray-800">Question Editor</h1>
+
+        {/* Buttons */}
+        <div className="mb-4 flex gap-2">
+          <button
+            onClick={handleInsertEquation}
+            disabled={showEquationEditor}
+            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors font-medium"
           >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+            Insert Equation
+          </button>
+          <button
+            onClick={handleCreateJSON}
+            disabled={!value}
+            className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors font-medium"
           >
-            Documentation
-          </a>
+            Create JSON
+          </button>
         </div>
-      </main>
+
+        {/* Equation Editor Popup */}
+        {showEquationEditor && (
+          <div className="mb-4 p-4 bg-green-50 border-2 border-green-400 rounded-lg">
+            <div className="mb-3">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Enter your equation using the keyboard below:
+              </label>
+              <div className="bg-white p-3 border border-gray-300 rounded">
+                {isMathLiveLoaded && React.createElement('math-field', {
+                  ref: mathFieldRef,
+                  style: {
+                    display: 'block',
+                    width: '100%',
+                    minHeight: '60px',
+                    fontSize: '20px',
+                    border: 'none',
+                    outline: 'none',
+                  },
+                })}
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={handleDoneEquation}
+                className="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 transition-colors font-medium"
+              >
+                Insert
+              </button>
+              <button
+                onClick={handleCancelEquation}
+                className="px-4 py-2 bg-gray-500 text-white rounded hover:bg-gray-600 transition-colors font-medium"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Main Input */}
+        <div className="mb-4">
+          <label className="block text-sm font-medium mb-2 text-gray-700">
+            Type your question:
+          </label>
+          <MathLiveInput
+            value={value}
+            onChange={setValue}
+            placeholder="Type your question here. Click 'Insert Equation' button above to add math..."
+            className="w-full"
+          />
+        </div>
+
+        {/* JSON Output */}
+        {showJSON && value && (
+          <div className="mb-4">
+            <div className="flex justify-between items-center mb-2">
+              <label className="block text-sm font-medium text-gray-700">
+                JSON Output:
+              </label>
+              <button
+                onClick={() => setShowJSON(false)}
+                className="text-sm text-gray-500 hover:text-gray-700"
+              >
+                ✕ Close
+              </button>
+            </div>
+            <pre className="w-full p-4 bg-gray-50 border-2 border-gray-300 text-gray-800 rounded-lg overflow-auto text-sm font-mono max-h-96">
+              {JSON.stringify(getQuestionJSON(), null, 2)}
+            </pre>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
