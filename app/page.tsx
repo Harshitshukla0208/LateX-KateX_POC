@@ -8,6 +8,7 @@ export default function Home() {
   const [showEquationEditor, setShowEquationEditor] = useState(false);
   const [isMathLiveLoaded, setIsMathLiveLoaded] = useState(false);
   const [showJSON, setShowJSON] = useState(false);
+  const [cursorPosition, setCursorPosition] = useState<number | null>(null);
   const mathFieldRef = useRef<any>(null);
 
   // Load MathLive
@@ -20,6 +21,9 @@ export default function Home() {
   });
 
   const handleInsertEquation = () => {
+    // Store the current cursor position (end of value by default)
+    // The equation will be inserted at this position
+    setCursorPosition(value.length);
     setShowEquationEditor(true);
   };
 
@@ -36,11 +40,15 @@ export default function Home() {
     if (mathFieldRef.current) {
       const latex = mathFieldRef.current.getValue();
       if (latex) {
-        // Append equation with delimiters to the current value
-        setValue(value + `$$${latex}$$ `);
+        const equation = `$$${latex}$$ `;
+        const pos = cursorPosition !== null ? cursorPosition : value.length;
+        // Insert equation at cursor position
+        const newValue = value.slice(0, pos) + equation + value.slice(pos);
+        setValue(newValue);
       }
     }
     setShowEquationEditor(false);
+    setCursorPosition(null);
     if (mathFieldRef.current) {
       mathFieldRef.current.setValue('');
     }

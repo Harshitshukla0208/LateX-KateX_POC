@@ -2,6 +2,7 @@
 
 import React, { useState, useRef, useEffect, useCallback } from 'react'
 import MathRenderer from './MathRenderer'
+import SelectionToolbar from './SelectionToolbar'
 import { Edit2, Keyboard, AlertCircle } from 'lucide-react'
 
 // Declare the math-field custom element for TypeScript
@@ -25,6 +26,8 @@ interface MathLiveInputProps {
   placeholder?: string
   className?: string
   multiline?: boolean
+  equationToInsert?: string | null
+  onEquationInserted?: () => void
 }
 
 interface MathSegment {
@@ -130,16 +133,98 @@ const validateLaTeX = (latex: string): { valid: boolean; error?: string } => {
   return { valid: true }
 }
 
+/**
+ * Converts markdown-style formatting to HTML for display
+ * Supports: **bold**, *italic*, __underline__, ~~strikethrough~~
+ * Adds zero-width space after formatted elements to break formatting context
+ */
+const convertMarkdownToHtml = (text: string): string => {
+  if (!text) return ''
+
+  let html = text
+
+  // Convert newlines to <br> first
+  html = html.replace(/\n/g, '<br>')
+
+  // Bold: **text** -> <strong>text</strong>​ (with zero-width space to break formatting)
+  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>\u200B')
+
+  // Italic: *text* -> <em>text</em> (but not ** which is bold)
+  html = html.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em>$1</em>\u200B')
+
+  // Underline: __text__ -> <u>text</u>
+  html = html.replace(/__([^_]+)__/g, '<u>$1</u>\u200B')
+
+  // Strikethrough: ~~text~~ -> <del>text</del>
+  html = html.replace(/~~([^~]+)~~/g, '<del>$1</del>\u200B')
+
+  return html
+}
+
+/**
+ * Converts HTML formatting back to markdown for storage
+ * Also strips zero-width space characters used for formatting context breaking
+ */
+const convertHtmlToMarkdown = (html: string): string => {
+  if (!html) return ''
+
+  let text = html
+
+  // Remove zero-width space characters (used for breaking formatting context)
+  text = text.replace(/\u200B/g, '')
+  text = text.replace(/&#8203;/g, '')
+  text = text.replace(/&ZeroWidthSpace;/gi, '')
+
+  // Convert <br> tags to newlines
+  text = text.replace(/<br\s*\/?>/gi, '\n')
+
+  // Convert formatting tags back to markdown
+  text = text.replace(/<strong>([^<]+)<\/strong>/gi, '**$1**')
+  text = text.replace(/<b>([^<]+)<\/b>/gi, '**$1**')
+  text = text.replace(/<em>([^<]+)<\/em>/gi, '*$1*')
+  text = text.replace(/<i>([^<]+)<\/i>/gi, '*$1*')
+  text = text.replace(/<u>([^<]+)<\/u>/gi, '__$1__')
+  text = text.replace(/<del>([^<]+)<\/del>/gi, '~~$1~~')
+  text = text.replace(/<s>([^<]+)<\/s>/gi, '~~$1~~')
+  text = text.replace(/<strike>([^<]+)<\/strike>/gi, '~~$1~~')
+
+  // Remove other HTML tags and entities
+  text = text.replace(/<\/div><div>/gi, '\n')
+  text = text.replace(/<div>/gi, '\n')
+  text = text.replace(/<\/div>/gi, '')
+  text = text.replace(/&nbsp;/gi, ' ')
+  text = text.replace(/<[^>]*>/g, '')
+
+  return text
+}
+
 const MathLiveInput: React.FC<MathLiveInputProps> = ({
   value,
   onChange,
   placeholder = "Enter text with LaTeX...",
   className = "",
-  multiline = false
+  multiline = false,
+  equationToInsert = null,
+  onEquationInserted
 }) => {
   const [showRawEditor, setShowRawEditor] = useState(false)
   const [validationError, setValidationError] = useState<string | null>(null)
+  const [containerHeight, setContainerHeight] = useState(80) // Initial height in pixels
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const isResizingRef = useRef(false)
+  const isTypingRef = useRef<{ [key: number]: boolean }>({}) // Track which segments are being typed
+  const editableRefs = useRef<{ [key: number]: HTMLElement }>({}) // Store refs to editable elements
+
+  // Handle equation insertion when equationToInsert prop changes
+  useEffect(() => {
+    if (equationToInsert) {
+      // Insert equation at the end of current value
+      const newValue = value + `$$${equationToInsert}$$ `
+      onChange(newValue)
+      onEquationInserted?.()
+    }
+  }, [equationToInsert])
 
   const parseSegments = useCallback((text: string): MathSegment[] => {
     const segments: MathSegment[] = []
@@ -203,9 +288,20 @@ const MathLiveInput: React.FC<MathLiveInputProps> = ({
 
   const segments = parseSegments(value)
 
+  // Check if there are any math segments to adjust line-height accordingly
+  const hasMathSegments = segments.some(seg => seg.type === 'math')
+  const dynamicLineHeight = hasMathSegments ? '2.5' : '1.5'
+
   const handleSegmentChange = useCallback((index: number, newContent: string) => {
     const newSegments = [...segments]
-    newSegments[index].content = newContent
+
+    // If the new content is empty and it's a math segment, remove it entirely
+    if ((!newContent || newContent.trim() === '') && newSegments[index].type === 'math') {
+      newSegments.splice(index, 1)
+    } else {
+      newSegments[index].content = newContent
+    }
+
     const reconstructedValue = newSegments.map(seg => {
       if (seg.type === 'math') {
         return `${seg.delimiter}${seg.content}${seg.delimiter}`
@@ -232,6 +328,33 @@ const MathLiveInput: React.FC<MathLiveInputProps> = ({
     onChange(newValue)
   }, [onChange])
 
+  // Resize handler functions
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    isResizingRef.current = true
+
+    const startY = e.clientY
+    const startHeight = containerHeight
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      if (!isResizingRef.current) return
+
+      const deltaY = moveEvent.clientY - startY
+      const newHeight = Math.max(80, Math.min(600, startHeight + deltaY)) // Min 80px, Max 600px
+      setContainerHeight(newHeight)
+    }
+
+    const handleMouseUp = () => {
+      isResizingRef.current = false
+      document.removeEventListener('mousemove', handleMouseMove)
+      document.removeEventListener('mouseup', handleMouseUp)
+    }
+
+    document.addEventListener('mousemove', handleMouseMove)
+    document.addEventListener('mouseup', handleMouseUp)
+  }, [containerHeight])
+
   useEffect(() => {
     if (showRawEditor && textareaRef.current) {
       const textarea = textareaRef.current
@@ -239,6 +362,156 @@ const MathLiveInput: React.FC<MathLiveInputProps> = ({
       textarea.style.height = Math.max(textarea.scrollHeight, 80) + 'px'
     }
   }, [value, showRawEditor])
+
+  // Handle text formatting from selection toolbar with toggle support
+  const handleFormat = useCallback((type: 'bold' | 'italic' | 'underline' | 'strikethrough') => {
+    const selection = window.getSelection()
+    if (!selection || selection.isCollapsed || !selection.rangeCount) return
+
+    const range = selection.getRangeAt(0)
+    const selectedText = selection.toString().trim()
+    if (!selectedText) return
+
+    // Check if selection is within our container
+    if (!containerRef.current) return
+
+    const anchorNode = selection.anchorNode
+    if (!anchorNode || !containerRef.current.contains(anchorNode)) return
+
+    // Find which segment contains the selection
+    let targetSegmentIndex = -1
+    let targetEditableElement: HTMLElement | null = null
+    
+    const editableElements = containerRef.current.querySelectorAll('[contenteditable="true"]')
+    for (let i = 0; i < editableElements.length; i++) {
+      const element = editableElements[i] as HTMLElement
+      if (element.contains(anchorNode)) {
+        targetSegmentIndex = i
+        targetEditableElement = element
+        break
+      }
+    }
+
+    if (targetSegmentIndex === -1 || !targetEditableElement) return
+
+    // Check if this is a text segment
+    const segment = segments[targetSegmentIndex]
+    if (!segment || segment.type !== 'text') return
+
+    // Get the HTML content of the selected area to check for existing formatting
+    const tempDiv = document.createElement('div')
+    tempDiv.appendChild(range.cloneContents())
+    const selectedHtml = tempDiv.innerHTML
+
+    // Check if selection already has this formatting
+    const formatChecks = {
+      bold: /<strong[^>]*>|<b[^>]*>/i.test(selectedHtml),
+      italic: /<em[^>]*>|<i[^>]*>/i.test(selectedHtml),
+      underline: /<u[^>]*>/i.test(selectedHtml),
+      strikethrough: /<del[^>]*>|<s[^>]*>|<strike[^>]*>/i.test(selectedHtml)
+    }
+
+    // Also check parent elements
+    let current: Node | null = anchorNode
+    while (current && current !== targetEditableElement) {
+      if (current.nodeType === Node.ELEMENT_NODE) {
+        const element = current as HTMLElement
+        const tagName = element.tagName?.toLowerCase()
+        if (tagName === 'strong' || tagName === 'b') formatChecks.bold = true
+        if (tagName === 'em' || tagName === 'i') formatChecks.italic = true
+        if (tagName === 'u') formatChecks.underline = true
+        if (tagName === 'del' || tagName === 's' || tagName === 'strike') formatChecks.strikethrough = true
+      }
+      current = current.parentNode
+    }
+
+    const hasFormat = formatChecks[type]
+
+    // Focus the editable element to enable execCommand
+    targetEditableElement.focus()
+    
+    // Restore selection
+    selection.removeAllRanges()
+    selection.addRange(range)
+
+    // Use document.execCommand for formatting (supports undo natively)
+    const commandMap = {
+      bold: 'bold',
+      italic: 'italic',
+      underline: 'underline',
+      strikethrough: 'strikethrough'
+    }
+
+    const command = commandMap[type]
+    if (command) {
+      try {
+        // Toggle formatting: if already formatted, remove it; otherwise add it
+        // execCommand with 'false' as second param toggles the format
+        const success = document.execCommand(command, false, undefined)
+        
+        if (!success) {
+          // Fallback: manually wrap/unwrap
+          if (hasFormat) {
+            // Remove formatting - unwrap the tags
+            const formatTags = {
+              bold: ['strong', 'b'],
+              italic: ['em', 'i'],
+              underline: ['u'],
+              strikethrough: ['del', 's', 'strike']
+            }
+            const tags = formatTags[type]
+            for (const tag of tags) {
+              const elements = range.commonAncestorContainer.parentElement?.querySelectorAll(tag) || []
+              elements.forEach(el => {
+                if (range.intersectsNode(el)) {
+                  const parent = el.parentNode
+                  if (parent) {
+                    while (el.firstChild) {
+                      parent.insertBefore(el.firstChild, el)
+                    }
+                    parent.removeChild(el)
+                  }
+                }
+              })
+            }
+          } else {
+            // Add formatting - wrap with appropriate tag
+            const tagMap = {
+              bold: 'strong',
+              italic: 'em',
+              underline: 'u',
+              strikethrough: 'del'
+            }
+            const tagName = tagMap[type]
+            const wrapper = document.createElement(tagName)
+            try {
+              range.surroundContents(wrapper)
+            } catch (e) {
+              // If surroundContents fails, extract and wrap
+              const contents = range.extractContents()
+              wrapper.appendChild(contents)
+              range.insertNode(wrapper)
+            }
+          }
+        }
+      } catch (e) {
+        console.error('Error applying format:', e)
+      }
+    }
+
+    // Get the updated HTML and convert back to markdown
+    setTimeout(() => {
+      const newHtml = targetEditableElement!.innerHTML
+      const newMarkdown = convertHtmlToMarkdown(newHtml)
+      if (newMarkdown !== segment.content) {
+        handleTextEdit(targetSegmentIndex, newMarkdown)
+      }
+    }, 10)
+  }, [segments, handleTextEdit, convertHtmlToMarkdown])
+
+  // Note: Using onBlur for updates instead of onInput to prevent cursor jumping
+  // The zero-width spaces in convertMarkdownToHtml break formatting context
+
 
   if (showRawEditor) {
     return (
@@ -278,30 +551,177 @@ const MathLiveInput: React.FC<MathLiveInputProps> = ({
   return (
     <div className="relative">
       <div
-        className={`w-full min-h-[40px] p-2 border rounded focus-within:ring-2 focus-within:ring-blue-500 focus-within:border-blue-500 bg-white ${className}`}
+        ref={containerRef}
+        className={`w-full p-2 border rounded focus-within:ring-2 focus-within:ring-blue-500 focus-within:border-blue-500 bg-white overflow-auto hide-scrollbar cursor-text ${className}`}
+        style={{
+          minHeight: `${containerHeight}px`,
+          height: `${containerHeight}px`,
+          transition: isResizingRef.current ? 'none' : 'height 0.1s ease',
+          resize: 'none',
+          position: 'relative',
+          scrollbarWidth: 'none', // Firefox
+          msOverflowStyle: 'none', // IE and Edge
+        } as React.CSSProperties & { scrollbarWidth?: string; msOverflowStyle?: string }}
         onClick={(e) => {
-          if (e.target === e.currentTarget) {
-            const container = e.currentTarget
-            if (segments.length === 0) {
-              // Create initial space to start typing
-              onChange(' ')
-              setTimeout(() => {
-                const firstEditable = container.querySelector('[contenteditable="true"]')
-                if (firstEditable) {
-                  (firstEditable as HTMLElement).focus()
+          const container = e.currentTarget
+          const target = e.target as HTMLElement
+
+          // Don't interfere if clicking directly on an editable element or math field
+          if (target.contentEditable === 'true' || target.closest('[contenteditable="true"]') || target.closest('math-field')) {
+            return
+          }
+
+          // Don't interfere with toolbar clicks
+          if (target.closest('.fixed.z-50')) {
+            return
+          }
+
+          // Handle clicks anywhere in the container
+          e.preventDefault()
+          e.stopPropagation()
+
+          if (segments.length === 0) {
+            // Create initial space to start typing
+            onChange(' ')
+            setTimeout(() => {
+              const firstEditable = container.querySelector('[contenteditable="true"]') as HTMLElement
+              if (firstEditable) {
+                firstEditable.focus()
+                // Place cursor at the end
+                const range = document.createRange()
+                const sel = window.getSelection()
+                range.selectNodeContents(firstEditable)
+                range.collapse(false)
+                sel?.removeAllRanges()
+                sel?.addRange(range)
+              }
+            }, 10)
+          } else {
+            // Find the best editable element to focus
+            const editables = Array.from(container.querySelectorAll('[contenteditable="true"]')) as HTMLElement[]
+            const mathFields = Array.from(container.querySelectorAll('math-field')) as HTMLElement[]
+
+            // Get click position
+            const clickX = e.clientX
+            const clickY = e.clientY
+
+            // Find the closest editable element to the click
+            let closestEditable: HTMLElement | null = null
+            let minDistance = Infinity
+
+            // Check all editable elements
+            for (const editable of editables) {
+              const rect = editable.getBoundingClientRect()
+              // Calculate distance from click to element center
+              const centerX = rect.left + rect.width / 2
+              const centerY = rect.top + rect.height / 2
+              const distance = Math.sqrt(Math.pow(clickX - centerX, 2) + Math.pow(clickY - centerY, 2))
+              
+              // Also check if click is within element bounds
+              if (clickX >= rect.left && clickX <= rect.right && clickY >= rect.top && clickY <= rect.bottom) {
+                closestEditable = editable
+                break
+              } else if (distance < minDistance) {
+                minDistance = distance
+                closestEditable = editable
+              }
+            }
+
+            // If no editable found, use the last one
+            if (!closestEditable && editables.length > 0) {
+              closestEditable = editables[editables.length - 1]
+            }
+
+            if (closestEditable) {
+              closestEditable.focus()
+              
+              // Try to position cursor based on click location
+              const rect = closestEditable.getBoundingClientRect()
+              if (clickX >= rect.left && clickX <= rect.right && clickY >= rect.top && clickY <= rect.bottom) {
+                // Click is within the element, try to position cursor at click location
+                let range: Range | null = null
+                
+                // Try different methods to get caret position
+                if (document.caretRangeFromPoint) {
+                  range = document.caretRangeFromPoint(clickX, clickY)
+                } else if ((document as any).caretPositionFromPoint) {
+                  const caretPos = (document as any).caretPositionFromPoint(clickX, clickY)
+                  if (caretPos) {
+                    range = document.createRange()
+                    range.setStart(caretPos.offsetNode, caretPos.offset)
+                    range.collapse(true)
+                  }
                 }
-              }, 10)
+                
+                if (range && closestEditable.contains(range.commonAncestorContainer)) {
+                  const selection = window.getSelection()
+                  if (selection) {
+                    selection.removeAllRanges()
+                    selection.addRange(range)
+                  }
+                } else {
+                  // Fallback: place at end
+                  const range = document.createRange()
+                  const sel = window.getSelection()
+                  range.selectNodeContents(closestEditable)
+                  range.collapse(false)
+                  sel?.removeAllRanges()
+                  sel?.addRange(range)
+                }
+              } else {
+                // Click is outside element, place cursor at end
+                const range = document.createRange()
+                const sel = window.getSelection()
+                range.selectNodeContents(closestEditable)
+                range.collapse(false)
+                sel?.removeAllRanges()
+                sel?.addRange(range)
+              }
             } else {
-              const firstEditable = container.querySelector('[contenteditable="true"], math-field')
-              if (firstEditable && 'focus' in firstEditable) {
-                (firstEditable as HTMLElement).focus()
+              // No editables found, create one by adding a space
+              const lastTextSegmentIndex = segments.findLastIndex(seg => seg.type === 'text')
+              if (lastTextSegmentIndex >= 0) {
+                // Add space to last text segment to create editable
+                const lastSegment = segments[lastTextSegmentIndex]
+                handleTextEdit(lastTextSegmentIndex, lastSegment.content + ' ')
+                setTimeout(() => {
+                  const editables = container.querySelectorAll('[contenteditable="true"]')
+                  const newEditable = editables[lastTextSegmentIndex] as HTMLElement
+                  if (newEditable) {
+                    newEditable.focus()
+                    const range = document.createRange()
+                    const sel = window.getSelection()
+                    range.selectNodeContents(newEditable)
+                    range.collapse(false)
+                    sel?.removeAllRanges()
+                    sel?.addRange(range)
+                  }
+                }, 10)
+              } else {
+                // No text segments, create one
+                onChange(value + ' ')
+                setTimeout(() => {
+                  const firstEditable = container.querySelector('[contenteditable="true"]') as HTMLElement
+                  if (firstEditable) {
+                    firstEditable.focus()
+                    const range = document.createRange()
+                    const sel = window.getSelection()
+                    range.selectNodeContents(firstEditable)
+                    range.collapse(false)
+                    sel?.removeAllRanges()
+                    sel?.addRange(range)
+                  }
+                }, 10)
               }
             }
           }
         }}
       >
         {segments.length > 0 ? (
-          <div className="flex flex-wrap items-start gap-1">
+          <div 
+            style={{ minHeight: '24px', lineHeight: dynamicLineHeight, width: '100%' }}
+            className="cursor-text"
+          >
             {segments.map((segment, index) => (
               segment.type === 'math' ? (
                 <MathFieldEditor
@@ -310,24 +730,17 @@ const MathLiveInput: React.FC<MathLiveInputProps> = ({
                   onChange={(newValue) => handleSegmentChange(index, newValue)}
                 />
               ) : (
-                <span
+                <EditableTextSegment
                   key={index}
-                  contentEditable
-                  suppressContentEditableWarning
-                  onBlur={(e) => {
-                    const newContent = e.currentTarget.textContent || ''
-                    if (newContent !== segment.content) {
-                      handleTextEdit(index, newContent)
-                    }
-                  }}
-                  onKeyDown={(e) => {
-                    e.stopPropagation()
-                  }}
-                  className="outline-none min-w-[20px] cursor-text"
-                  style={{ whiteSpace: 'pre-wrap', lineHeight: '1.5', wordBreak: 'break-word' }}
-                >
-                  {segment.content}
-                </span>
+                  index={index}
+                  segment={segment}
+                  dynamicLineHeight={dynamicLineHeight}
+                  onTextEdit={handleTextEdit}
+                  convertMarkdownToHtml={convertMarkdownToHtml}
+                  convertHtmlToMarkdown={convertHtmlToMarkdown}
+                  isTypingRef={isTypingRef}
+                  editableRefs={editableRefs}
+                />
               )
             ))}
           </div>
@@ -338,7 +751,25 @@ const MathLiveInput: React.FC<MathLiveInputProps> = ({
             {placeholder}
           </div>
         )}
+
+        {/* Resize Handle */}
+        <div
+          onMouseDown={handleMouseDown}
+          className="absolute bottom-0 right-0 w-4 h-4 cursor-nwse-resize hover:bg-blue-500 hover:opacity-50 transition-all"
+          style={{
+            background: 'linear-gradient(135deg, transparent 0%, transparent 50%, #94a3b8 50%, #94a3b8 100%)',
+            borderBottomRightRadius: '0.375rem'
+          }}
+          title="Drag to resize"
+        />
       </div>
+
+      {/* Selection Toolbar for rich text formatting */}
+      <SelectionToolbar
+        containerRef={containerRef}
+        onFormat={handleFormat}
+      />
+
       {/* <div className="mt-1 flex justify-between items-center text-xs text-gray-500">
         <button
           type="button"
@@ -349,6 +780,201 @@ const MathLiveInput: React.FC<MathLiveInputProps> = ({
         </button>
       </div> */}
     </div>
+  )
+}
+
+// Editable Text Segment Component - handles cursor position preservation
+interface EditableTextSegmentProps {
+  index: number
+  segment: MathSegment
+  dynamicLineHeight: string
+  onTextEdit: (index: number, newText: string) => void
+  convertMarkdownToHtml: (text: string) => string
+  convertHtmlToMarkdown: (html: string) => string
+  isTypingRef: React.MutableRefObject<{ [key: number]: boolean }>
+  editableRefs: React.MutableRefObject<{ [key: number]: HTMLElement }>
+}
+
+const EditableTextSegment: React.FC<EditableTextSegmentProps> = ({
+  index,
+  segment,
+  dynamicLineHeight,
+  onTextEdit,
+  convertMarkdownToHtml,
+  convertHtmlToMarkdown,
+  isTypingRef,
+  editableRefs
+}) => {
+  const elementRef = useRef<HTMLSpanElement>(null)
+  const lastContentRef = useRef<string>(segment.content)
+  const isInitialMountRef = useRef(true)
+
+  // Save cursor position
+  const saveCursorPosition = useCallback(() => {
+    const selection = window.getSelection()
+    if (!selection || selection.rangeCount === 0) return null
+
+    const range = selection.getRangeAt(0)
+    const element = elementRef.current
+    if (!element || !element.contains(range.commonAncestorContainer)) return null
+
+    // Calculate cursor position relative to element
+    const preCaretRange = range.cloneRange()
+    preCaretRange.selectNodeContents(element)
+    preCaretRange.setEnd(range.endContainer, range.endOffset)
+    const cursorOffset = preCaretRange.toString().length
+
+    return cursorOffset
+  }, [])
+
+  // Restore cursor position
+  const restoreCursorPosition = useCallback((offset: number) => {
+    if (!elementRef.current) return
+
+    const selection = window.getSelection()
+    if (!selection) return
+
+    const element = elementRef.current
+    const walker = document.createTreeWalker(
+      element,
+      NodeFilter.SHOW_TEXT,
+      null
+    )
+
+    let currentOffset = 0
+    let targetNode: Node | null = null
+    let targetOffset = 0
+
+    while (walker.nextNode()) {
+      const node = walker.currentNode
+      const textLength = node.textContent?.length || 0
+
+      if (currentOffset + textLength >= offset) {
+        targetNode = node
+        targetOffset = offset - currentOffset
+        break
+      }
+
+      currentOffset += textLength
+    }
+
+    if (targetNode) {
+      const range = document.createRange()
+      range.setStart(targetNode, Math.min(targetOffset, targetNode.textContent?.length || 0))
+      range.collapse(true)
+      selection.removeAllRanges()
+      selection.addRange(range)
+    }
+  }, [])
+
+  // Only update innerHTML if content changed from outside (not from user typing)
+  useEffect(() => {
+    if (isInitialMountRef.current) {
+      isInitialMountRef.current = false
+      if (elementRef.current) {
+        editableRefs.current[index] = elementRef.current
+        // Set initial content
+        elementRef.current.innerHTML = convertMarkdownToHtml(segment.content)
+        lastContentRef.current = segment.content
+      }
+      return
+    }
+
+    // Only update if content changed externally and user is not typing
+    if (segment.content !== lastContentRef.current && !isTypingRef.current[index]) {
+      const cursorPos = saveCursorPosition()
+      if (elementRef.current) {
+        const newHtml = convertMarkdownToHtml(segment.content)
+        // Only update if HTML actually changed
+        if (elementRef.current.innerHTML !== newHtml) {
+          elementRef.current.innerHTML = newHtml
+          lastContentRef.current = segment.content
+          if (cursorPos !== null) {
+            // Restore cursor after a brief delay to ensure DOM is updated
+            requestAnimationFrame(() => {
+              restoreCursorPosition(cursorPos)
+            })
+          }
+        } else {
+          // HTML is the same, just update the ref
+          lastContentRef.current = segment.content
+        }
+      }
+    }
+  }, [segment.content, index, convertMarkdownToHtml, saveCursorPosition, restoreCursorPosition, isTypingRef, editableRefs])
+
+  const handleBlur = useCallback((e: React.FocusEvent<HTMLSpanElement>) => {
+    isTypingRef.current[index] = false
+    const newContent = e.currentTarget.innerHTML || ''
+    const textContent = convertHtmlToMarkdown(newContent)
+    if (textContent !== segment.content) {
+      onTextEdit(index, textContent)
+      lastContentRef.current = textContent
+    }
+  }, [index, segment.content, onTextEdit, convertHtmlToMarkdown, isTypingRef])
+
+  const handleFocus = useCallback(() => {
+    isTypingRef.current[index] = true
+    if (elementRef.current) {
+      editableRefs.current[index] = elementRef.current
+    }
+  }, [index, isTypingRef, editableRefs])
+
+  const handleInput = useCallback((e: React.FormEvent<HTMLSpanElement>) => {
+    // Mark as typing to prevent external updates
+    isTypingRef.current[index] = true
+    // Update last content ref to current HTML to prevent unnecessary updates
+    if (elementRef.current) {
+      lastContentRef.current = convertHtmlToMarkdown(elementRef.current.innerHTML)
+    }
+    // Clear typing flag after user stops typing
+    clearTimeout((elementRef.current as any)?.typingTimeout)
+    ;(elementRef.current as any).typingTimeout = setTimeout(() => {
+      isTypingRef.current[index] = false
+    }, 1000)
+  }, [index, isTypingRef, convertHtmlToMarkdown])
+
+  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLSpanElement>) => {
+    e.stopPropagation()
+
+    // Handle arrow keys and other navigation to escape formatting
+    if (e.key === 'ArrowRight' || e.key === 'End') {
+      const selection = window.getSelection()
+      if (selection && selection.anchorNode) {
+        const node = selection.anchorNode
+        // Check if cursor is inside a formatting element (strong, em, u, del)
+        const formattingParent = (node.parentElement as HTMLElement)?.closest('strong, em, u, del, b, i, s')
+        if (formattingParent) {
+          // Move cursor out of the formatting element
+          const range = document.createRange()
+          range.setStartAfter(formattingParent)
+          range.collapse(true)
+          selection.removeAllRanges()
+          selection.addRange(range)
+        }
+      }
+    }
+  }, [])
+
+  return (
+    <span
+      ref={elementRef}
+      contentEditable
+      suppressContentEditableWarning
+      onBlur={handleBlur}
+      onFocus={handleFocus}
+      onInput={handleInput}
+      onKeyDown={handleKeyDown}
+      className="outline-none cursor-text"
+      style={{
+        whiteSpace: 'pre-wrap',
+        lineHeight: dynamicLineHeight,
+        wordBreak: 'break-word',
+        display: 'inline',
+        minWidth: '1ch',
+        verticalAlign: 'baseline'
+      }}
+    />
   )
 }
 
@@ -697,6 +1323,13 @@ const MathFieldEditor: React.FC<MathFieldEditorProps> = ({ value, onChange }) =>
       // Normalize the LaTeX to ensure consistent format
       const normalized = normalizeLaTeX(newValue)
 
+      // If the equation box is now empty, signal removal by passing empty string
+      if (!normalized || normalized.trim() === '') {
+        lastNormalizedValueRef.current = ''
+        onChangeRef.current('') // This will trigger removal of the equation box
+        return
+      }
+
       // Only update if the normalized value actually changed
       if (normalized !== lastNormalizedValueRef.current) {
         lastNormalizedValueRef.current = normalized
@@ -927,14 +1560,15 @@ const MathFieldEditor: React.FC<MathFieldEditorProps> = ({ value, onChange }) =>
   }
 
   return (
-    <span className="relative inline-flex items-center gap-1">
+    <span className="relative inline-flex items-center align-baseline" style={{ verticalAlign: 'baseline', margin: '0 2px' }}>
       <span
-        className={`inline-flex items-center rounded px-2 py-1 transition-all ${isFocused
+        className={`inline-flex items-center rounded px-1 py-0.5 transition-all align-baseline ${isFocused
           ? 'bg-yellow-50 border-2 border-yellow-400 shadow-lg'
           : 'bg-green-50 border border-green-300 cursor-text hover:bg-green-100 hover:shadow-md group'
           }`}
         onClick={handleClick}
         title="Click to edit"
+        style={{ verticalAlign: 'baseline' }}
       >
         {React.createElement('math-field', {
           ref: mathFieldRef,
@@ -956,10 +1590,11 @@ const MathFieldEditor: React.FC<MathFieldEditorProps> = ({ value, onChange }) =>
       {isFocused && (
         <button
           type="button"
-          className={`keyboard-toggle-btn p-1.5 rounded-md transition-all cursor-pointer border-2 ${showKeyboard
+          className={`keyboard-toggle-btn p-1.5 rounded-md transition-all cursor-pointer border-2 inline-block align-middle ${showKeyboard
             ? 'bg-blue-600 text-white shadow-lg border-blue-700 hover:bg-blue-700'
             : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50 hover:border-gray-400 shadow-sm'
             }`}
+          style={{ verticalAlign: 'middle', marginLeft: '4px' }}
           onClick={toggleKeyboard}
           onTouchEnd={toggleKeyboard}
           onMouseDown={(e) => e.preventDefault()}
