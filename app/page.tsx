@@ -1,7 +1,7 @@
 "use client"
 
 import React, { useState, useRef, useEffect } from "react";
-import MathLiveInput from "@/components/MathLiveInput";
+import MathLiveInput, { MathLiveInputHandle } from "@/components/MathLiveInput";
 
 export default function Home() {
   const [value, setValue] = useState("");
@@ -10,6 +10,7 @@ export default function Home() {
   const [showJSON, setShowJSON] = useState(false);
   const [cursorPosition, setCursorPosition] = useState<number | null>(null);
   const mathFieldRef = useRef<any>(null);
+  const mathInputRef = useRef<MathLiveInputHandle>(null);
 
   // Load MathLive
   useState(() => {
@@ -20,10 +21,13 @@ export default function Home() {
     }
   });
 
+  // Called on mousedown (before blur clears the selection) to capture cursor position
+  const handleInsertEquationMouseDown = () => {
+    const pos = mathInputRef.current?.getCursorPosition() ?? value.length;
+    setCursorPosition(pos);
+  };
+
   const handleInsertEquation = () => {
-    // Store the current cursor position (end of value by default)
-    // The equation will be inserted at this position
-    setCursorPosition(value.length);
     setShowEquationEditor(true);
   };
 
@@ -79,6 +83,7 @@ export default function Home() {
         {/* Buttons */}
         <div className="mb-4 flex gap-2">
           <button
+            onMouseDown={handleInsertEquationMouseDown}
             onClick={handleInsertEquation}
             disabled={showEquationEditor}
             className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors font-medium"
@@ -138,6 +143,7 @@ export default function Home() {
             Type your question:
           </label>
           <MathLiveInput
+            ref={mathInputRef}
             value={value}
             onChange={setValue}
             placeholder="Type your question here. Click 'Insert Equation' button above to add math..."

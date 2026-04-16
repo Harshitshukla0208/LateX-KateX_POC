@@ -1,6 +1,6 @@
 "use client"
 
-import React, { useState, useRef, useEffect, useCallback } from 'react'
+import React, { useState, useRef, useEffect, useCallback, forwardRef, useImperativeHandle } from 'react'
 import MathRenderer from './MathRenderer'
 import SelectionToolbar from './SelectionToolbar'
 import { Edit2, Keyboard, AlertCircle } from 'lucide-react'
@@ -28,6 +28,10 @@ interface MathLiveInputProps {
   multiline?: boolean
   equationToInsert?: string | null
   onEquationInserted?: () => void
+}
+
+export interface MathLiveInputHandle {
+  getCursorPosition: () => number
 }
 
 interface MathSegment {
@@ -198,15 +202,14 @@ const convertHtmlToMarkdown = (html: string): string => {
   return text
 }
 
-const MathLiveInput: React.FC<MathLiveInputProps> = ({
+const MathLiveInput = forwardRef<MathLiveInputHandle, MathLiveInputProps>(({
   value,
   onChange,
   placeholder = "Enter text with LaTeX...",
   className = "",
-  multiline = false,
   equationToInsert = null,
   onEquationInserted
-}) => {
+}, ref) => {
   const [showRawEditor, setShowRawEditor] = useState(false)
   const [validationError, setValidationError] = useState<string | null>(null)
   const [containerHeight, setContainerHeight] = useState(80) // Initial height in pixels
@@ -512,6 +515,34 @@ const MathLiveInput: React.FC<MathLiveInputProps> = ({
   // Note: Using onBlur for updates instead of onInput to prevent cursor jumping
   // The zero-width spaces in convertMarkdownToHtml break formatting context
 
+  // Expose getCursorPosition so parent can read cursor position before blur clears it
+  useImperativeHandle(ref, () => ({
+    getCursorPosition: (): number => {
+      const selection = window.getSelection()
+      if (!selection || selection.rangeCount === 0) return value.length
+
+      const range = selection.getRangeAt(0)
+
+      // Check each text segment's editable element (keyed by segment index)
+      for (const [indexStr, el] of Object.entries(editableRefs.current)) {
+        if (!el) continue
+        const segIndex = parseInt(indexStr)
+        if (el.contains(range.commonAncestorContainer)) {
+          // Compute the text offset within this element
+          const preCaretRange = range.cloneRange()
+          preCaretRange.selectNodeContents(el)
+          preCaretRange.setEnd(range.endContainer, range.endOffset)
+          const offsetInElement = preCaretRange.toString().length
+
+          // Map to absolute position in value using the segment's start
+          const segment = segments[segIndex]
+          if (segment) return segment.start + offsetInElement
+        }
+      }
+
+      return value.length
+    }
+  }), [value, segments, editableRefs])
 
   if (showRawEditor) {
     return (
@@ -781,7 +812,7 @@ const MathLiveInput: React.FC<MathLiveInputProps> = ({
       </div> */}
     </div>
   )
-}
+})
 
 // Editable Text Segment Component - handles cursor position preservation
 interface EditableTextSegmentProps {
